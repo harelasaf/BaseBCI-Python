@@ -1,0 +1,161 @@
+import os
+import numpy as np
+import time
+from pylsl import StreamInfo, StreamOutlet, local_clock
+from psychopy import visual, event, core
+
+def get_computer_name():
+    """
+    Get the local computer name.
+    """
+    return os.environ['COMPUTERNAME']
+
+def create_recording_folder(sub_id, root_folder):
+    """
+    Define recording folder location and create the folder.
+    """
+    recording_folder = os.path.join(root_folder, f'BCI resources\\SSVEP\\Recordings\\Sub{sub_id}')
+    os.makedirs(recording_folder, exist_ok=True)
+    return recording_folder
+
+def binary_stim_init(refresh_rate, condition_freq, trial_length, flag):
+    """
+    Prepare binary sequences for stimuli presentation based on refresh rate and target frequencies.
+    """
+    num_frames = int(trial_length * refresh_rate)
+    condition_binary = np.random.randint(0, 2, (len(condition_freq), num_frames))
+    return condition_binary
+
+def prepare_training(num_trials, num_targets):
+    """
+    Prepare a vector with the conditions for each trial.
+    """
+    training_vec = np.random.randint(1, num_targets + 1, num_trials)
+    return training_vec
+
+def ssvep1_training_scaffolding():
+    """
+    SSVEP Training Scaffolding
+    This function creates a training paradigm with numTargets on screen for numTrials.
+    Before each trial, one of the targets is cued (and remains cued for the entire trial).
+    This code assumes EEG is recorded and streamed through LSL for later offline preprocessing and model learning.
+    """
+
+    # Set parameters
+    sub_id = input('Please enter subject ID/Name: ')
+    comp_name = get_computer_name()
+
+    # Define Dropbox folder location based on computer name
+    if comp_name.lower() == 'desktop-6d533n5':
+        root_folder = 'D:\\Dropbox (BGU)'
+    else:
+        root_folder = 'C:\\Dropbox (BGU)'
+
+    # Create recording folder
+    recording_folder = create_recording_folder(sub_id, root_folder)
+
+    trial_length = 5  # Each trial length in seconds
+    num_trials = 30  # Number of training trials
+    num_targets = 2  # Number of possible targets
+    low_end = 7  # Lower bound of target frequency
+    high_end = 24  # Higher bound of target frequency
+    freq_step = 1  # Difference between each neighboring frequency
+
+    # Lab Streaming Layer Init
+    print('Loading the Lab Streaming Layer library...')
+    info = StreamInfo('MarkerStream', 'Markers', 1, 0, 'cf_string', 'myuniquesourceid23443')
+    outlet_stream = StreamOutlet(info)
+
+    print('Open Lab Recorder & check for MarkerStream and EEG stream, start recording, return here and hit any key to continue.')
+    input()  # Wait for experimenter to press a key
+
+    # Psychtoolbox, Stim, Screen Params Init
+    print('Setting up Psychtoolbox parameters...')
+    print('This will open a black screen - good luck!')
+
+    win = visual.Window(fullscr=True, color='black')
+    refresh_rate = win.getActualFrameRate()
+    num_frames = int(trial_length * refresh_rate)
+
+    # Prepare Green Square Cues & White Square Stims
+    square_size = 200
+    white_square_size = 180
+    green_color = [0, 1, 0]
+    pen_width_pixels = 6
+    square_xpos_ratio = 1 / (num_targets + 1)
+    screen_xpixels = win.size[0]
+    screen_ypixels = win.size[1]
+    y_center = win.size[1] / 2
+
+    # Calculate screen X positions of rectangles
+    square_xpos = [screen_xpixels * square_xpos_ratio * (i + 1) for i in range(num_targets)]
+
+    # Prepare frequencies and binary sequences
+    possible_freqs = list(range(low_end, high_end + 1, freq_step))
+    condition_freq = [7, 17]  # Example frequencies for each target
+    flag = 1
+    condition_binary = binary_stim_init(refresh_rate, condition_freq, trial_length, flag)
+
+    # Save condition frequencies
+    np.save(os.path.join(recording_folder, 'conditionFreq.npy'), condition_freq)
+
+    # Prepare set of training trials
+    training_vec = prepare_training(num_trials, num_targets)
+    np.save(os.path.join(recording_folder, 'trainingVec.npy'), training_vec)
+
+    session_freqs = [condition_freq[i - 1] for i in training_vec]
+    np.save(os.path.join(recording_folder, 'sessionFreqs.npy'), session_freqs)
+
+    # Define the keyboard keys that are listened for
+    escape_key = 'escape'
+    event.globalKeys.add(key=escape_key, func=core.quit, name='quit')
+
+    # Hide the cursor
+    win.mouseVisible = False
+
+    # Record Training Stage
+    outlet_stream.push_sample([111])  # Start of recordings
+
+    for trial in range(num_trials):
+        # Show "Ready" on screen for 2 seconds, followed by the relevant target
+        ready_text = visual.TextStim(win, text='Ready', pos=(0, -screen_ypixels * 0.25), color='white', height=70)
+        ready_text.draw()
+        win.flip()
+        core.wait(2)
+
+        current_trial = training_vec[trial]
+        current_freq = session_freqs[trial]
+
+        # Show green cue prior to stimuli
+        green_rect = visual.Rect(win, width=square_size, height=square_size, pos=(square_xpos[current_trial - 1], y_center), lineColor=green_color, lineWidth=pen_width_pixels)
+        trial_text = visual.TextStim(win, text=f'Trial #{trial + 1} from: {num_trials}', pos=(0, -screen_ypixels * 0.25), color='white', height=70)
+        green_rect.draw()
+        trial_text.draw()
+        win.flip()
+        core.wait(2)
+
+        # Send LSL markers
+        outlet_stream.push_sample([1111])  # Marker for trial start
+        outlet_stream.push_sample([current_trial])  # Marker for condition
+        outlet_stream.push_sample([current_freq])  # Marker for condition frequency
+
+        for frame in range(num_frames):
+            # Display white squares and green cue
+            for i in range(num_targets):
+                white_rect = visual.Rect(win, width=white_square_size, height=white_square_size, pos=(square_xpos[i], y_center), fillColor=[condition_binary[i, frame]] * 3)
+                white_rect.draw()
+            green_rect.draw()
+            win.flip()
+            if event.getKeys(keyList=[escape_key]):
+                win.mouseVisible = True
+                win.close()
+                core.quit()
+
+    # End of recording session
+    outlet_stream.push_sample([99])  # Marker for end of experiment
+    win.mouseVisible = True
+    win.close()
+    print('Stop the LabRecorder recording!')
+
+if __name__ == "__main__":
+    ssvep1_training_scaffolding()
